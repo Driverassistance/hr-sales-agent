@@ -1,8 +1,8 @@
 // ===============================
 //  HR / SALES AGENT — AYNA MURATOVNA
+//  ПОЛНАЯ "ЖИВАЯ" ВЕРСИЯ
 // ===============================
 
-// Load ENV
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -10,7 +10,6 @@ import Fastify from "fastify";
 import fetch from "node-fetch";
 import pkg from "pg";
 
-// Init Fastify
 const fastify = Fastify({ logger: true });
 
 // DB
@@ -20,11 +19,43 @@ const pool = new Pool({
 });
 
 // ---------------------------------
-// Telegram sender
+// UTILS: Telegram helpers
 // ---------------------------------
-async function sendTG(chatId, text) {
+
+async function sendTyping(chatId) {
+  const url = `https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendChatAction`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      action: "typing",
+    }),
+  });
+}
+
+function humanDelay(text) {
+  const len = text.length;
+
+  if (len < 50) return 1200 + Math.random() * 800;     // 1.2 - 2 sec
+  if (len < 150) return 2000 + Math.random() * 2000;   // 2 - 4 sec
+  if (len < 300) return 3500 + Math.random() * 2500;   // 3.5 - 6 sec
+
+  return 6000 + Math.random() * 4000;                  // 6 - 10 sec
+}
+
+async function sendHuman(chatId, text) {
+  await sendTyping(chatId);
+
+  const delay = humanDelay(text);
+  await new Promise(res => setTimeout(res, delay));
+
+  await sendMsg(chatId, text);
+}
+
+async function sendMsg(chatId, text) {
   const url = `https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendMessage`;
-  const resp = await fetch(url, {
+  await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -33,173 +64,53 @@ async function sendTG(chatId, text) {
       parse_mode: "Markdown",
     }),
   });
-
-  const data = await resp.json().catch(() => null);
-  console.log("🔥 sendTG response:", data);
 }
 
 // ---------------------------------
-// Helpers: tone & validation
+// Tone check
 // ---------------------------------
 
-// Простейший детект хамства
 function isRude(text = "") {
-  const t = text.toLowerCase();
-  const rudeWords = [
-    "заткнись",
-    "отстань",
-    "иди отсюда",
-    "иди на",
-    "нах",
-    "нахер",
-    "нахуй",
-    "дура",
-    "тупая",
-    "долбо",
-    "идиот",
-    "еба",
-    "ебан",
-    "пошел вон",
-    "пошёл вон",
-    "пошла вон",
-    "пошла на",
+  const rude = [
+    "нах", "иди на", "пошел", "пошёл", "долбо", "тупая",
+    "дура", "идиот", "ебан", "глупая", "отстань", "заткнись",
   ];
-  return rudeWords.some((w) => t.includes(w));
+  const t = text.toLowerCase();
+  return rude.some(w => t.includes(w));
 }
 
-// Простейший детект «шутки/несерьёза»
-function looksLikeJokeOrTrash(text = "") {
-  const t = text.toLowerCase().trim();
+function looksLikeJoke(text = "") {
+  const t = text.toLowerCase();
 
-  if (!t) return false;
-
-  // много «ахах», смайлов, «лол» и т.п.
-  if (t.includes("ахах") || t.includes("хаха") || t.includes("лол") || t.includes("кек"))
-    return true;
-
-  // смайлики без содержания
-  if (/^[\s\p{Emoji_Presentation}\p{Emoji}\p{Extended_Pictographic}]+$/u.test(t)) return true;
-
-  // очень короткая абракадабра
+  if (t.includes("ахах") || t.includes("кек") || t.includes("лол")) return true;
+  if (/^[\p{Emoji}|\p{Extended_Pictographic}]+$/u.test(t)) return true;
   if (t.length <= 3 && !/[а-яa-z]/i.test(t)) return true;
 
-  // клавиатурный спам: почти одни согласные/бессмысленное
   const letters = t.replace(/[^a-zа-яё]/gi, "");
   if (letters && letters.length >= 4) {
-    const vowels = letters.match(/[aeiouаеёиоуыэюя]/gi) || [];
+    const vowels = letters.match(/[аеёиоуыэюяaeiou]/gi) || [];
     if (vowels.length / letters.length < 0.2) return true;
   }
 
   return false;
 }
 
-// Валидация ФИО
-function validateFullName(text = "") {
-  const t = text.trim();
-  if (t.length < 5) return false;
-  if (/\d/.test(t)) return false;
-
-  const parts = t.split(/\s+/);
-  if (parts.length < 2) return false;
-
-  // хотя бы 2 адекватных слова
-  const validParts = parts.filter((p) => p.length >= 2);
-  return validParts.length >= 2;
-}
-
-// Валидация даты рождения: ДД.ММ.ГГГГ + диапазон 1950–2007
-function validateBirthday(text = "") {
-  const t = text.trim();
-  const m = t.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
-  if (!m) return false;
-
-  const day = Number(m[1]);
-  const month = Number(m[2]);
-  const year = Number(m[3]);
-
-  if (year < 1950 || year > 2007) return false;
-  if (month < 1 || month > 12) return false;
-  if (day < 1 || day > 31) return false;
-
-  // грубая проверка месяцев
-  const thirtyDayMonths = [4, 6, 9, 11];
-  if (thirtyDayMonths.includes(month) && day > 30) return false;
-  if (month === 2 && day > 29) return false;
-
-  return true;
-}
-
-// Валидация должности
-function validatePosition(text = "") {
-  const t = text.trim();
-  if (t.length < 3 || t.length > 50) return false;
-  if (/^\d+$/.test(t)) return false; // только цифры
-  if (!/[a-zа-яё]/i.test(t)) return false; // нет букв
-  return true;
-}
-
-// Нормализация и валидация опыта
-function normalizeExperience(text = "") {
-  const t = text.toLowerCase().trim();
-
-  const mapping = [
-    { variants: ["новичок", "без опыта", "только начал", "начинающий"], value: "новичок" },
-    { variants: ["менее года", "<1 года", "< 1 года", "0-1"], value: "менее года" },
-    { variants: ["1 год", "один год", "1год"], value: "1 год" },
-    { variants: ["2 года", "два года", "2года"], value: "2 года" },
-    { variants: ["3 года", "три года", "3года", "3+ лет", "3+ года"], value: "3+ лет" },
-    {
-      variants: [
-        "больше 5 лет",
-        "5 лет",
-        "5+ лет",
-        "много",
-        "давно",
-        "10 лет",
-        "10+ лет",
-      ],
-      value: "5+ лет",
-    },
-  ];
-
-  for (const item of mapping) {
-    if (item.variants.some((v) => t.includes(v))) {
-      return item.value;
-    }
-  }
-
-  // Попробуем по цифре
-  const num = parseInt(t.replace(/\D/g, ""), 10);
-  if (!isNaN(num)) {
-    if (num === 0) return "менее года";
-    if (num === 1) return "1 год";
-    if (num === 2) return "2 года";
-    if (num === 3 || num === 4) return "3+ лет";
-    if (num >= 5) return "5+ лет";
-  }
-
-  return null; // не смогли распознать
-}
-
-// Общий обработчик «тона»
-async function handleToneGuard(chatId, text) {
+async function toneGuard(chatId, text) {
   if (isRude(text)) {
-    await sendTG(
+    await sendHuman(
       chatId,
       "Такой тон *недопустим*.\n\n" +
-        "Я фиксирую это как случай неуважительного обращения.\n" +
-        "Информация будет передана вашему руководителю.\n\n" +
-        "Давайте продолжим в рабочем формате."
+      "Я фиксирую это как случай неуважительного обращения.\n" +
+      "Информация будет передана вашему руководителю.\n\n" +
+      "Давайте продолжим в рабочем формате."
     );
     return "rude";
   }
 
-  if (looksLikeJokeOrTrash(text)) {
-    await sendTG(
+  if (looksLikeJoke(text)) {
+    await sendHuman(
       chatId,
-      "Давайте без шуточек 😊\n" +
-        "Мы сейчас работаем над вашей профессиональной программой развития.\n" +
-        "Ответьте, пожалуйста, корректно — это важно для вас же."
+      "Давайте без шуточек. Мы сейчас работаем над вашей профессиональной программой развития. Ответьте корректно, пожалуйста."
     );
     return "joke";
   }
@@ -207,221 +118,277 @@ async function handleToneGuard(chatId, text) {
   return "ok";
 }
 
-// ------------------------------
-// MAIN WEBHOOK HANDLER
-// ------------------------------
+// ---------------------------------
+// Validators
+// ---------------------------------
+
+function validateFullName(t = "") {
+  t = t.trim();
+  if (t.length < 5) return false;
+  if (/\d/.test(t)) return false;
+
+  const parts = t.split(/\s+/);
+  if (parts.length < 2) return false;
+
+  return true;
+}
+
+function validateBirthday(t = "") {
+  t = t.trim();
+  const m = t.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (!m) return false;
+
+  const [_, d, mo, y] = m;
+  const day = Number(d);
+  const month = Number(mo);
+  const year = Number(y);
+
+  if (year < 1950 || year > 2007) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+
+  return true;
+}
+
+function validatePosition(t = "") {
+  t = t.trim();
+  if (t.length < 3) return false;
+  if (!/[a-zа-яё]/i.test(t)) return false;
+  if (/^\d+$/.test(t)) return false;
+  return true;
+}
+
+function normalizeExperience(t = "") {
+  t = t.toLowerCase().trim();
+  const variants = [
+    { keys: ["новичок"], out: "новичок" },
+    { keys: ["1"], out: "1 год" },
+    { keys: ["2"], out: "2 года" },
+    { keys: ["3", "3+"], out: "3+ лет" },
+    { keys: ["5", "5+", "больше"], out: "5+ лет" },
+  ];
+
+  const n = parseInt(t.replace(/\D/g, ""), 10);
+  if (!isNaN(n)) {
+    if (n === 0) return "менее года";
+    if (n === 1) return "1 год";
+    if (n === 2) return "2 года";
+    if (n === 3 || n === 4) return "3+ лет";
+    if (n >= 5) return "5+ лет";
+  }
+
+  return null;
+}
+
+// ---------------------------------
+//  RANDOM "busy" behavior
+// ---------------------------------
+
+function randomBusy() {
+  // 15% шанс включить "занята"
+  return Math.random() < 0.15;
+}
+
+async function sendBusy(chatId) {
+  const variants = [
+    "Я сейчас немного занята, дайте мне пару минут, я вернусь 🙏",
+    "Секунду… заканчиваю консультацию.",
+    "Спасибо, что написали. Одну минутку, пожалуйста.",
+    "Ненадолго отвлеклась, сейчас отвечу.",
+  ];
+
+  const msg = variants[Math.floor(Math.random() * variants.length)];
+  await sendHuman(chatId, msg);
+}
+
+// ---------------------------------
+//  MAIN WEBHOOK
+// ---------------------------------
+
 fastify.post("/webhook", async (req, reply) => {
   try {
-    console.log("🔥 RAW UPDATE:", JSON.stringify(req.body, null, 2));
-
     const body = req.body;
     if (!body.message) return { ok: true };
 
     const chatId = body.message.chat.id;
     const text = (body.message.text || "").trim();
 
-    console.log("🔥 point A: BEFORE SELECT");
+    console.log("🔥 RAW UPDATE:", JSON.stringify(req.body, null, 2));
 
-    const res = await pool.query("SELECT * FROM employees WHERE tg_id = $1", [chatId]);
-    let employee = res.rows[0];
+    const r1 = await pool.query("SELECT * FROM employees WHERE tg_id = $1", [chatId]);
+    let user = r1.rows[0];
 
-    console.log("🔥 point B: employee =", employee);
-
-    // ------------------------------
-    // FIRST TIME — NO EMPLOYEE
-    // ------------------------------
-    if (!employee) {
-      console.log("🔥 point C: NEW USER — start registration");
-
+    // ---------------------------------
+    // NEW USER
+    // ---------------------------------
+    if (!user) {
       await pool.query(
         "INSERT INTO employees (tg_id, registration_state) VALUES ($1, $2)",
-        [chatId, "awaiting_fullname"]
+        [chatId, "await_fullname"]
       );
 
-      await sendTG(
+      await sendHuman(
         chatId,
-        "Приветствую 👋\n\n" +
-          "Меня зовут *Айна Муратовна*.\n" +
-          "Я корпоративный психолог, коуч и бизнес-тренер компании.\n\n" +
-          "Для начала давайте познакомимся.\n" +
-          "Напишите, пожалуйста, *своё полное имя* (ФИО)."
+        "Здравствуйте 👋\nМеня зовут *Айна Муратовна*. Давайте начнём с простого — напишите, пожалуйста, ваше *ФИО полностью*."
       );
 
       return { ok: true };
     }
 
-    // Refresh after creation
-    const res2 = await pool.query("SELECT * FROM employees WHERE tg_id = $1", [chatId]);
-    employee = res2.rows[0];
-    const state = employee.registration_state;
+    const state = user.registration_state;
 
-    // Если человек уже зарегистрирован и пишет /start
-    if (state === "complete" && text === "/start") {
-      await sendTG(
-        chatId,
-        "Снова на связи, *Айна Муратовна*.\n" +
-          "Я рядом. Можем разобрать рабочие ситуации, продажи, стресс или мотивацию.\n\n" +
-          "Что волнует вас сейчас?"
-      );
-      return { ok: true };
+    // sometimes simulate "busy"
+    if (randomBusy()) {
+      await sendBusy(chatId);
     }
 
-    // ------------------------------
-    // Step 1 — Full name
-    // ------------------------------
-    if (state === "awaiting_fullname") {
-      // сначала проверяем тон
-      const tone = await handleToneGuard(chatId, text);
-      if (tone !== "ok") {
-        // не двигаем состояние, ждём нормальный ответ
-        return { ok: true };
-      }
+    // ---------------------------------
+    // FULLNAME
+    // ---------------------------------
+    if (state === "await_fullname") {
+      const tone = await toneGuard(chatId, text);
+      if (tone !== "ok") return { ok: true };
 
       if (!validateFullName(text)) {
-        await sendTG(
+        await sendHuman(
           chatId,
-          "ФИО выглядит некорректно.\n\n" +
-            "Пожалуйста, укажите *полностью*: имя и фамилию (при необходимости отчество).\n" +
-            "Например: *Иванов Иван Иванович*."
+          "ФИО выглядит некорректно. Укажите, пожалуйста, фамилию и имя."
         );
         return { ok: true };
       }
 
       await pool.query(
-        "UPDATE employees SET full_name = $1, registration_state = 'awaiting_birthday' WHERE tg_id = $2",
+        "UPDATE employees SET full_name = $1, registration_state = 'await_birthday' WHERE tg_id = $2",
         [text, chatId]
       );
 
-      await sendTG(
+      await sendHuman(
         chatId,
-        "Отлично 👌\n\nТеперь напишите, пожалуйста, *дату рождения* в формате *ДД.ММ.ГГГГ*.\n" +
-          "Например: *05.09.1990*."
+        "Спасибо 🙌\nТеперь напишите, пожалуйста, вашу *дату рождения* в формате ДД.ММ.ГГГГ."
       );
+
       return { ok: true };
     }
 
-    // ------------------------------
-    // Step 2 — Birthday
-    // ------------------------------
-    if (state === "awaiting_birthday") {
-      const tone = await handleToneGuard(chatId, text);
-      if (tone !== "ok") {
-        return { ok: true };
-      }
+    // ---------------------------------
+    // BIRTHDAY
+    // ---------------------------------
+    if (state === "await_birthday") {
+      const tone = await toneGuard(chatId, text);
+      if (tone !== "ok") return { ok: true };
 
       if (!validateBirthday(text)) {
-        await sendTG(
-          chatId,
-          "Дата рождения указана в некорректном формате или нереалистична.\n\n" +
-            "Пожалуйста, введите дату в формате *ДД.ММ.ГГГГ* в разумном диапазоне.\n" +
-            "Например: *14.03.1987*."
-        );
+        await sendHuman(chatId, "Дата рождения неверна. Укажите в формате *ДД.MM.ГГГГ*.");
         return { ok: true };
       }
 
       await pool.query(
-        "UPDATE employees SET birthday = $1, registration_state = 'awaiting_position' WHERE tg_id = $2",
+        "UPDATE employees SET birthday = $1, registration_state = 'await_position' WHERE tg_id = $2",
         [text, chatId]
       );
 
-      await sendTG(
+      await sendHuman(
         chatId,
-        "Спасибо 🙌\n\nТеперь укажите, пожалуйста, *вашу должность* в компании.\n" +
-          "Например: *торговый представитель*, *супервайзер*, *заведующий складом*."
+        "Хорошо 👍\nТеперь напишите вашу *должность*."
       );
+
       return { ok: true };
     }
 
-    // ------------------------------
-    // Step 3 — Position
-    // ------------------------------
-    if (state === "awaiting_position") {
-      const tone = await handleToneGuard(chatId, text);
-      if (tone !== "ok") {
-        return { ok: true };
-      }
+    // ---------------------------------
+    // POSITION
+    // ---------------------------------
+    if (state === "await_position") {
+      const tone = await toneGuard(chatId, text);
+      if (tone !== "ok") return { ok: true };
 
       if (!validatePosition(text)) {
-        await sendTG(
-          chatId,
-          "Не поняла вашу должность 🤔\n\n" +
-            "Напишите, пожалуйста, *реальную должность* без шуток и сокращений.\n" +
-            "Например: *торговый представитель*, *мерчендайзер*, *руководитель отдела продаж*."
-        );
+        await sendHuman(chatId, "Должность указана некорректно. Напишите реальную должность.");
         return { ok: true };
       }
 
       await pool.query(
-        "UPDATE employees SET position = $1, registration_state = 'awaiting_experience' WHERE tg_id = $2",
+        "UPDATE employees SET position = $1, registration_state = 'await_exp' WHERE tg_id = $2",
         [text, chatId]
       );
 
-      await sendTG(
+      await sendHuman(
         chatId,
-        "Хорошо 👍\n\nТеперь напишите, пожалуйста, *ваш опыт работы в продажах* или в текущей роли.\n" +
-          "Можно в свободной форме — например: *новичок*, *1 год*, *3 года*, *больше 5 лет*."
+        "Хорошо. Теперь напишите ваш *опыт работы* — например: новичок, 1 год, 3+ лет."
       );
+
       return { ok: true };
     }
 
-    // ------------------------------
-    // Step 4 — Experience
-    // ------------------------------
-    if (state === "awaiting_experience") {
-      const tone = await handleToneGuard(chatId, text);
-      if (tone !== "ok") {
-        return { ok: true };
-      }
+    // ---------------------------------
+    // EXPERIENCE
+    // ---------------------------------
+    if (state === "await_exp") {
+      const tone = await toneGuard(chatId, text);
+      if (tone !== "ok") return { ok: true };
 
-      const normalized = normalizeExperience(text);
-      if (!normalized) {
-        await sendTG(
+      const exp = normalizeExperience(text);
+      if (!exp) {
+        await sendHuman(
           chatId,
-          "Чтобы я могла правильно выстроить программу развития, давайте определимся с опытом.\n\n" +
-            "Выберите один из вариантов и напишите его:\n" +
-            "• *новичок*\n" +
-            "• *менее года*\n" +
-            "• *1 год*\n" +
-            "• *2 года*\n" +
-            "• *3+ лет*\n" +
-            "• *5+ лет*"
+          "Опыт не распознан. Напишите: новичок / 1 год / 2 года / 3+ лет / 5+ лет."
         );
         return { ok: true };
       }
 
       await pool.query(
         "UPDATE employees SET experience = $1, registration_state = 'complete' WHERE tg_id = $2",
-        [normalized, chatId]
+        [exp, chatId]
       );
 
-      await sendTG(
+      // ---------------------------------
+      // 4-СООБЩЕНИЯ ПРИВЕТСТВИЯ ПОСЛЕ РЕГИСТРАЦИИ
+      // ---------------------------------
+
+      await sendHuman(
         chatId,
-        "Благодарю 🙏\n\n" +
-          "Регистрация завершена.\n\n" +
-          "Теперь моя задача — помочь вам:\n" +
-          "• усиливать *продажи* и результаты\n" +
-          "• прокачивать *переговоры* и работу с возражениями\n" +
-          "• держать *дисциплину* и внутренний тонус\n" +
-          "• справляться со *стрессом* и нагрузкой\n\n" +
-          "Пишите в любой момент — я рядом. Начнём с чего-то конкретного или хотите общую диагностику?"
+        "Спасибо 🙏\nРегистрация завершена. Дайте мне минутку…"
+      );
+
+      await sendHuman(
+        chatId,
+        "Я — *Айна Муратовна*: корпоративный психолог, адаптолог и бизнес-тренер с 15-летним опытом. " +
+        "Буду сопровождать вас, помогать развиваться и усиливать результаты."
+      );
+
+      await sendHuman(
+        chatId,
+        "Мы будем работать над:\n" +
+        "• продажами и переговорами\n" +
+        "• дисциплиной\n" +
+        "• стрессоустойчивостью\n" +
+        "• уверенностью и мотивацией\n" +
+        "• вашим личным развитием"
+      );
+
+      await sendHuman(
+        chatId,
+        "Всё, что вы пишете — *конфиденциально*. " +
+        "Руководству передаются только результаты тестов и факты нарушения деловой этики."
+      );
+
+      await sendHuman(
+        chatId,
+        "Можете писать в любое время. Что сейчас актуально?"
       );
 
       return { ok: true };
     }
 
-    // ------------------------------
+    // ---------------------------------
     // AFTER REGISTRATION
-    // ------------------------------
+    // ---------------------------------
+
     if (state === "complete") {
-      // здесь дальше можно будет разветвить логику:
-      // продажи, стресс, план на день, отчёт и т.п.
-      await sendTG(
+      await sendHuman(
         chatId,
-        "Я рядом.\n" +
-          "Можем разобрать конкретную ситуацию с клиентом, ваш день, мотивацию или состояние.\n\n" +
-          "Напишите, что сейчас для вас самое актуальное."
+        "Я рядом. Давайте разберём вашу текущую ситуацию или рабочий вопрос."
       );
-      return { ok: true };
     }
 
     return { ok: true };
@@ -433,4 +400,4 @@ fastify.post("/webhook", async (req, reply) => {
 
 // START SERVER
 fastify.listen({ port: process.env.PORT || 3006, host: "0.0.0.0" });
-console.log("🔥 SERVER ЗАПУЩЕН");
+console.log("🔥 SERVER ЗАПУЩЕН (LIVE HR MODE)");
