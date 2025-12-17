@@ -13,6 +13,7 @@ import { sendMessage, sendTyping } from "./utils/telegram.js";
 import { sleep, humanDelay, busyDelay } from "./core/delays.js";
 import { getSession, incInvalid, resetInvalid } from "./core/session.js";
 import { isGarbage, strictReply } from "./core/guards.js";
+import { isSalesTrigger, handleSales } from "./flows/sales.js";
 
 
 const fastify = Fastify({ logger: true });
@@ -199,6 +200,12 @@ if (isGarbage(text)) {
 } else {
   resetInvalid(session);
 }
+    // === SALES FLOW ===
+    if (isSalesTrigger(text)) {
+      session.lastTopic = "sales";
+      const handled = await handleSales({ sendMsg, chatId, session, text });
+      if (handled) return { ok: true };
+    }
 
     console.log("🔥 RAW UPDATE:", JSON.stringify(req.body, null, 2));
 
