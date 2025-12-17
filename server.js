@@ -9,6 +9,9 @@ dotenv.config();
 import Fastify from "fastify";
 import fetch from "node-fetch";
 import pkg from "pg";
+import { sendMessage, sendTyping } from "./utils/telegram.js";
+import { sleep, humanDelay, busyDelay } from "./core/delays.js";
+
 
 const fastify = Fastify({ logger: true });
 
@@ -22,27 +25,6 @@ const pool = new Pool({
 // UTILS: Telegram helpers
 // ---------------------------------
 
-async function sendTyping(chatId) {
-  const url = `https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendChatAction`;
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      action: "typing",
-    }),
-  });
-}
-
-function humanDelay(text) {
-  const len = text.length;
-
-  if (len < 50) return 1200 + Math.random() * 800;     // 1.2 - 2 sec
-  if (len < 150) return 2000 + Math.random() * 2000;   // 2 - 4 sec
-  if (len < 300) return 3500 + Math.random() * 2500;   // 3.5 - 6 sec
-
-  return 6000 + Math.random() * 4000;                  // 6 - 10 sec
-}
 
 async function sendHuman(chatId, text) {
   await sendTyping(chatId);
@@ -54,17 +36,11 @@ async function sendHuman(chatId, text) {
 }
 
 async function sendMsg(chatId, text) {
-  const url = `https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown",
-    }),
-  });
+  await sendTyping(process.env.TG_BOT_TOKEN, chatId);
+  await humanDelay(text);
+  await sendMessage(process.env.TG_BOT_TOKEN, chatId, text);
 }
+
 
 // ---------------------------------
 // Tone check
@@ -385,13 +361,68 @@ fastify.post("/webhook", async (req, reply) => {
     // ---------------------------------
 
     if (state === "complete") {
-      await sendHuman(
-        chatId,
-        "Я рядом. Давайте разберём вашу текущую ситуацию или рабочий вопрос."
-      );
-    }
 
+  // 1. Анти-флуд / анти-личное
+  const nonWork = [
+    "как дела", "что делаешь", "чем занимаешься",
+    "скучаешь", "поболтаем", "поговорим",
+    "кофе", "чай", "любишь", "нравится",
+    "ты кто", "кто ты", "расскажи о себе",
+    "давай просто", "ничего не хочу", "не хочу работать"
+  ];
+
+  const lower = text.toLowerCase();
+  if (nonWork.some(w => lower.includes(w))) {
+    await sendHuman(
+      chatId,
+      "Я здесь исключительно для рабочих вопросов: продажи, клиенты, дисциплина, мотивация, стресс, эффективность.\n" +
+      "Давайте вернёмся к делу."
+    );
     return { ok: true };
+  }
+
+  // 2. Определение темы
+  if (lower.includes("продаж") || lower.includes("клиент") || lower.includes("выручк")) {
+    await sendHuman(chatId,
+      "Поняла. Давайте перейдём к продажам.\n" +
+      "Опишите, пожалуйста, что именно сейчас вызывает трудности: клиент, возражение, отсутствие мотивации, или что-то ещё?"
+    );
+    return { ok: true };
+  }
+
+  if (lower.includes("мотивац") || lower.includes("не хочу") || lower.includes("устал")) {
+    await sendHuman(chatId,
+      "Поняла. Давайте разберём вашу мотивацию.\n" +
+      "Что именно ощущаете сейчас: усталость, потеря интереса, эмоциональное выгорание, давление?",
+    );
+    return { ok: true };
+  }
+
+  if (lower.includes("стресс") || lower.includes("нерв") || lower.includes("тревог")) {
+    await sendHuman(chatId,
+      "Хорошо. Разберём стресс.\n" +
+      "Что стало причиной: клиенты, коллектив, личная ситуация или перегруз?"
+    );
+    return { ok: true };
+  }
+
+  if (lower.includes("дисциплин") || lower.includes("опаздыв") || lower.includes("режим")) {
+    await sendHuman(chatId,
+      "Давайте обсудим дисциплину.\n" +
+      "С чем именно сложности: режим дня, график, внимание или обещания самому себе?"
+    );
+    return { ok: true };
+  }
+
+  // 3. Если тема не определена
+  await sendHuman(
+    chatId,
+    "Я с вами. Давайте точно сформулируем вопрос: продажи, мотивация, клиентская ситуация, стресс или дисциплина?"
+  );
+
+  return { ok: true };
+}
+
   } catch (err) {
     console.error("❌ FATAL ERROR:", err.message, err.stack);
     return { ok: true };
