@@ -11,6 +11,8 @@ import fetch from "node-fetch";
 import pkg from "pg";
 import { sendMessage, sendTyping } from "./utils/telegram.js";
 import { sleep, humanDelay, busyDelay } from "./core/delays.js";
+import { getSession, incInvalid, resetInvalid } from "./core/session.js";
+import { isGarbage, strictReply } from "./core/guards.js";
 
 
 const fastify = Fastify({ logger: true });
@@ -188,6 +190,15 @@ fastify.post("/webhook", async (req, reply) => {
 
     const chatId = body.message.chat.id;
     const text = (body.message.text || "").trim();
+	const session = getSession(chatId);
+
+if (isGarbage(text)) {
+  const count = incInvalid(session);
+  await sendMsg(chatId, strictReply(count));
+  return { ok: true };
+} else {
+  resetInvalid(session);
+}
 
     console.log("🔥 RAW UPDATE:", JSON.stringify(req.body, null, 2));
 
