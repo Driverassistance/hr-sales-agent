@@ -1,8 +1,25 @@
 export function isGarbage(text) {
   if (!text) return true;
-  if (text.length < 3) return true;
-  return /^[^a-zA-Zа-яА-Я0-9]+$/.test(text);
+
+  const t = text.trim();
+
+  if (t.length < 4) return true;
+
+  // латиница без смысла
+  if (/^[a-zA-Z]+$/.test(t) && t.length < 8) return true;
+
+  // повторяющиеся символы
+  if (/^(.)\1{2,}$/.test(t)) return true;
+
+  // наборы типа asdf, qwer, aaaa
+  if (/^[a-zA-Z]{3,}$/.test(t) && !/[aeiouаеёиоуыэюя]/i.test(t)) return true;
+
+  // только символы
+  if (/^[^a-zA-Zа-яА-Я0-9]+$/.test(t)) return true;
+
+  return false;
 }
+
 
 export function strictReply(count) {
   if (count === 1) {
